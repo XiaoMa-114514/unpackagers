@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viewsb3解密</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #0071e3;
+    --border: #d2d2d7;
+    --ok: #1a7f37;
+    --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --card: #1c1c1e;
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --border: #3a3a3c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: 100%;
+    max-width: 560px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.12);
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p.sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+  #drop {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  #drop.drag { border-color: var(--accent); background: rgba(0,113,227,.06); }
+  #drop strong { color: var(--text); }
+  #file { display: none; }
+  .row { margin-top: 18px; }
+  button {
+    width: 100%;
+    padding: 11px 16px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #status { margin-top: 16px; font-size: 13px; min-height: 20px; word-break: break-all; }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--err); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .hint { margin-top: 18px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>.viewsb3解密</h1>
+
+
+  <div id="drop" tabindex="0">
+    拖入 <strong>.viewsb3</strong> 文件，或点击选择
+    <input id="file" type="file" accept=".viewsb3">
+  </div>
+
+  <div class="row">
+    <button id="go" disabled>解密并下载sb3</button>
+  </div>
+
+  <div id="status"></div>
+
+
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  
+  const VSB3_MAGIC = new Uint8Array([0x56, 0x53, 0x42, 0x33, 0x01]); 
+  const VSB3_SALT = new TextEncoder().encode('NeoWarpViewSb3FixedSalt2024');
+  const VSB3_PBKDF2_PASSWORD = 'neowarp-viewsb3-viewonly-v1';
+  const VSB3_PBKDF2_ITERATIONS = 10000;
+
+  const HEADER_LEN = VSB3_MAGIC.length + 12 + 16; 
+
+  const drop = document.getElementById('drop');
+  const input = document.getElementById('file');
+  const go = document.getElementById('go');
+  const status = document.getElementById('status');
+
+  /** @type {{name: string, data: ArrayBuffer} | null} */
+  let picked = null;
+
+  function setStatus(text, kind) {
+    status.textContent = text || '';
+    status.className = kind || '';
+  }
+
+  function bytesEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  async function deriveKey() {
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(VSB3_PBKDF2_PASSWORD),
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: VSB3_SALT, iterations: VSB3_PBKDF2_ITERATIONS, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt']
+    );
+  }
+
+  /**
+   * @param {ArrayBuffer} buffer
+   * @returns {Promise<Uint8Array>} 
+   */
+  async function decryptViewSb3(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length < HEADER_LEN) {
+      throw new Error('文件过短，不是有效的 .viewsb3 文件');
+    }
+    if (!bytesEqual(bytes.subarray(0, VSB3_MAGIC.length), VSB3_MAGIC)) {
+      throw new Error('文件头不匹配，不是有效的 .viewsb3 文件');
+    }
+
+    const off = VSB3_MAGIC.length;
+    const iv = bytes.subarray(off, off + 12);
+    const authTag = bytes.subarray(off + 12, off + 12 + 16);
+    const ciphertext = bytes.subarray(off + 12 + 16);
+
+    const key = await deriveKey();
+
+    
+    const dataWithTag = new Uint8Array(ciphertext.length + authTag.length);
+    dataWithTag.set(ciphertext, 0);
+    dataWithTag.set(authTag, ciphertext.length);
+
+    try {
+      const plain = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, tagLength: 128 },
+        key,
+        dataWithTag
+      );
+      return new Uint8Array(plain);
+    } catch (e) {
+      throw new Error('解密失败：文件已损坏或不是有效的.viewsb3');
+    }
+  }
+
+  function pickFile(file) {
+    if (!file) return;
+    picked = null;
+    go.disabled = true;
+    setStatus('');
+
+    if (!/\.viewsb3$/i.test(file.name)) {
+      setStatus('请选择扩展名为.viewsb3 的文件', 'err');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      picked = { name: file.name, data: reader.result };
+      go.disabled = false;
+      setStatus('已选择：' + file.name + '（' + file.size.toLocaleString() + ' 字节）');
+    };
+    reader.onerror = () => setStatus('读取文件失败', 'err');
+    reader.readAsArrayBuffer(file);
+  }
+
+  function download(bytes, originalName) {
+    const base = originalName.replace(/\.viewsb3$/i, '');
+    const blob = new Blob([bytes], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = base + '.sb3';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  go.addEventListener('click', async () => {
+    if (!picked) return;
+    go.disabled = true;
+    setStatus('解密中…');
+    try {
+      const sb3 = await decryptViewSb3(picked.data);
+      
+      if (sb3.length < 4 || sb3[0] !== 0x50 || sb3[1] !== 0x4b) {
+        throw new Error('解密结果不是有效的sb3');
+      }
+      download(sb3, picked.name);
+      setStatus('完成 ' + picked.name.replace(/\.viewsb3$/i, '.sb3'), 'ok');
+    } catch (e) {
+      setStatus(e && e.message ? e.message : String(e), 'err');
+      go.disabled = false;
+    }
+  });
+
+  drop.addEventListener('click', () => input.click());
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', () => pickFile(input.files && input.files[0]));
+
+  ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => {
+    e.preventDefault();
+    drop.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => {
+    e.preventDefault();
+    drop.classList.remove('drag');
+  }));
+  drop.addEventListener('drop', (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    pickFile(f);
+  });
+})();
+</script>
+</body>
+</html>
